@@ -1,11 +1,10 @@
 // Company settings (single document `_id: "company"`) and demo data utilities.
 import { HttpError } from "../core/http-error.ts";
-import { collection } from "../db.ts";
+import { docs, findById, json, query, TABLES } from "../db.ts";
 import { isValidCnpj, isValidEmail, onlyDigits } from "../lib/text.ts";
 import { CompanySettings } from "../views/settings.ts";
 
 const SETTINGS_ID = "company";
-const settings = () => collection<CompanySettings & { _id: string }>("settings");
 
 /** Fields only Admin can change. Gerente can change the preferences (alerts, POS). */
 export const COMPANY_FIELDS = [
@@ -30,7 +29,7 @@ export const SettingsPatch = CompanySettings.partial().meta({ id: "SettingsPatch
 export type SettingsPatch = Partial<CompanySettings>;
 
 export async function getSettings(): Promise<CompanySettings> {
-  const doc = await settings().findOne({ _id: SETTINGS_ID });
+  const doc = await findById<CompanySettings & { _id: string }>("settings", SETTINGS_ID);
   const { _id: _, ...saved } = doc ?? { _id: SETTINGS_ID };
   return { ...DEFAULT_SETTINGS, ...saved };
 }
@@ -43,18 +42,16 @@ export async function updateSettings(patch: SettingsPatch) {
   if (!isValidCnpj(next.cnpj)) throw new HttpError(400, "CNPJ inválido");
   if (next.phone) next.phone = onlyDigits(next.phone);
   if (next.email && !isValidEmail(next.email)) throw new HttpError(400, "E-mail inválido");
-  await settings().replaceOne({ _id: SETTINGS_ID }, next, { upsert: true });
+  await query("INSERT INTO settings (id, doc) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc", [
+    SETTINGS_ID,
+    json({ _id: SETTINGS_ID, ...next }),
+  ]);
   return next;
 }
 
-const EXPORTED_COLLECTIONS = [
-  "products", "categories", "stock_movements", "warehouse_addresses", "customers", "sales",
-  "accounts_payable", "accounts_receivable", "cash_sessions", "cash_movements", "settings",
-];
-
-/** Snapshot of all business collections (users are not exported). */
+/** Snapshot of all business tables (users are not exported). */
 export async function exportData() {
   const data: Record<string, unknown[]> = {};
-  for (const name of EXPORTED_COLLECTIONS) data[name] = await collection(name).find().toArray();
+  for (const name of TABLES.filter((t) => t !== "users")) data[name] = await docs(`SELECT doc FROM ${name}`);
   return { app: "BuildFlow ERP", version: 1, exportedAt: new Date().toISOString(), data };
 }

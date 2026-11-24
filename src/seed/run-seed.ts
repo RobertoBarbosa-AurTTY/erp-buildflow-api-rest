@@ -1,5 +1,5 @@
 // Replaces all data with the demo data. Used by `npm run seed` and POST /data/reset.
-import { collection, setSequence } from "../db.ts";
+import { insert, query, setSequence, type Table } from "../db.ts";
 import { hashPassword, type UserDocument } from "../models/user.ts";
 import { DEFAULT_SETTINGS } from "../models/settings.ts";
 import * as demo from "./data.ts";
@@ -10,9 +10,9 @@ const DEMO_USERS = [
   { _id: "u3", name: "Operador de Caixa", email: "caixa@buildflow.com.br", password: "caixa123", role: "Operador" },
 ] as const;
 
-async function replace(name: string, docs: { _id: string }[]) {
-  await collection(name).deleteMany({});
-  if (docs.length) await collection<{ _id: string }>(name).insertMany(docs);
+async function replace(name: Table, docs: { _id: string }[]) {
+  await query(`DELETE FROM ${name}`);
+  await insert(name, docs);
 }
 
 export async function seedDatabase() {

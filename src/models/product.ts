@@ -2,14 +2,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../core/http-error.ts";
-import { collection } from "../db.ts";
+import { docs, findById, insert, json, merge, query } from "../db.ts";
 import { round2, stockStatus } from "../lib/calc.ts";
 import { byName, normalize } from "../lib/text.ts";
 import { Product, type StockStats, type StockStatus } from "../views/product.ts";
 import type { WarehouseAddress } from "../views/stock.ts";
 import { recordMovement } from "./stock-movement.ts";
-
-export const products = () => collection<Product>("products");
 
 export const ProductInput = Product.omit({ _id: true, createdAt: true, updatedAt: true })
   .extend({
@@ -37,10 +35,10 @@ export function matchesSearch(product: Product, search: string) {
 }
 
 export async function listProducts(filters: ListProductsFilters) {
-  const query: Record<string, unknown> = {};
-  if (!filters.includeInactive) query.active = true;
-  if (filters.category) query.category = filters.category;
-  const list = await products().find(query).toArray();
+  const filter: Record<string, unknown> = {};
+  if (!filters.includeInactive) filter.active = true;
+  if (filters.category) filter.category = filters.category;
+  const list = await docs<Product>("SELECT doc FROM products WHERE doc @> $1::jsonb", [json(filter)]);
   return list
     .filter((p) => matchesSearch(p, filters.search ?? ""))
     .filter((p) => !filters.status || stockStatus(p) === filters.status)
@@ -48,7 +46,7 @@ export async function listProducts(filters: ListProductsFilters) {
 }
 
 export async function getProduct(id: string) {
-  const product = await products().findOne({ _id: id });
+  const product = await findById<Product>("products", id);
   if (!product) throw new HttpError(404, "Produto não encontrado");
   return product;
 }
@@ -56,7 +54,7 @@ export async function getProduct(id: string) {
 /** Exact SKU or barcode match, case/accent insensitive, active products only. */
 export async function findProductByCode(code: string) {
   const term = normalize(code);
-  const list = await products().find({ active: true }).toArray();
+  const list = await docs<Product>(`SELECT doc FROM products WHERE doc @> '{"active": true}'`);
   const product = list.find((p) => normalize(p.sku) === term || normalize(p.barcode) === term);
   if (!product) throw new HttpError(404, "Produto não encontrado");
   return product;
@@ -64,7 +62,7 @@ export async function findProductByCode(code: string) {
 
 /** SKU and barcode must be unique. */
 export async function validateProduct(input: Pick<ProductInput, "sku" | "barcode">, ignoreId?: string) {
-  const others = (await products().find({}, { projection: { sku: 1, barcode: 1 } }).toArray()).filter(
+  const others = (await docs<Product>("SELECT doc FROM products")).filter(
     (p) => p._id !== ignoreId,
   );
   if (others.some((p) => normalize(p.sku) === normalize(input.sku))) {
@@ -79,7 +77,7 @@ export async function createProduct(input: ProductInput, userName: string) {
   await validateProduct(input);
   const { quantity, ...data } = input;
   const product: Product = { ...data, _id: randomUUID(), quantity: 0, createdAt: new Date().toISOString() };
-  await products().insertOne(product);
+  await insert("products", product);
   if (quantity > 0) {
     await recordMovement(product._id, "ENTRADA", quantity, { reason: "Estoque inicial (cadastro)", userName });
   }
@@ -91,12 +89,12 @@ export async function updateProduct(id: string, patch: ProductPatch) {
   const current = await getProduct(id);
   const { quantity: _ignored, ...data } = patch;
   await validateProduct({ ...current, ...data }, id);
-  await products().updateOne({ _id: id }, { $set: { ...data, updatedAt: new Date().toISOString() } });
+  await merge("products", id, { ...data, updatedAt: new Date().toISOString() });
   return getProduct(id);
 }
 
 export async function getStockStats(expiryDays: number): Promise<StockStats> {
-  const list = await products().find({ active: true }).toArray();
+  const list = await docs<Product>(`SELECT doc FROM products WHERE doc @> '{"active": true}'`);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const limit = today.getTime() + expiryDays * 86_400_000;
@@ -116,13 +114,13 @@ export async function assignProductAddress(productId: string, addressId: string 
   await getProduct(productId);
   const updatedAt = new Date().toISOString();
   if (!addressId) {
-    await products().updateOne({ _id: productId }, { $unset: { location: "" }, $set: { updatedAt } });
+    await query("UPDATE products SET doc = (doc - 'location') || $2::jsonb WHERE id = $1", [productId, json({ updatedAt })]);
     return getProduct(productId);
   }
-  const address = await collection<WarehouseAddress>("warehouse_addresses").findOne({ _id: addressId });
+  const address = await findById<WarehouseAddress>("warehouse_addresses", addressId);
   if (!address) throw new HttpError(404, "Endereço não encontrado");
   if (!address.active) throw new HttpError(400, "Endereço inativo");
   const { deposit, aisle, shelf, level, slot } = address;
-  await products().updateOne({ _id: productId }, { $set: { location: { deposit, aisle, shelf, level, slot }, updatedAt } });
+  await merge("products", productId, { location: { deposit, aisle, shelf, level, slot }, updatedAt });
   return getProduct(productId);
 }

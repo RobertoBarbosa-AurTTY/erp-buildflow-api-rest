@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../core/http-error.ts";
-import { collection, nextSequence } from "../db.ts";
+import { docs, findById, insert, json, merge, nextSequence, query, replace } from "../db.ts";
 import { round2, saleAmountsByMethod, saleTotals } from "../lib/calc.ts";
 import { dayBounds } from "../lib/dates.ts";
 import type { Role } from "../views/auth.ts";
@@ -15,12 +15,6 @@ import type { Customer } from "../views/customer.ts";
 import type { Product } from "../views/product.ts";
 import { type Sale, SaleItem, type SaleStatus, type SplitPayment } from "../views/sale.ts";
 import { recordMovement } from "./stock-movement.ts";
-
-export const sales = () => collection<Sale>("sales");
-const products = () => collection<Product>("products");
-const customers = () => collection<Customer>("customers");
-const receivables = () => collection<Receivable>("accounts_receivable");
-const cashSessions = () => collection<CashSession>("cash_sessions");
 
 const isCustomItem = (item: Pick<SaleItem, "id">) => item.id.startsWith("custom-");
 
@@ -58,11 +52,15 @@ export interface SaleFilters {
 }
 
 export async function listSales(filters: SaleFilters) {
-  const query: Record<string, unknown> = {};
-  if (filters.start || filters.end) query.createdAt = dayBounds(filters.start, filters.end);
-  if (filters.status) query.status = filters.status;
+  const filter: Record<string, unknown> = {};
+  if (filters.status) filter.status = filters.status;
+  const { from, to } = dayBounds(filters.start, filters.end);
   const term = filters.search?.trim().toLowerCase().replace(/^#/, "") ?? "";
-  const list = await sales().find(query).sort({ createdAt: -1 }).toArray();
+  const list = await docs<Sale>(
+    `SELECT doc FROM sales WHERE doc @> $1::jsonb AND doc->>'createdAt' COLLATE "C" BETWEEN $2 AND $3
+     ORDER BY doc->>'createdAt' COLLATE "C" DESC`,
+    [json(filter), from, to],
+  );
   return list.filter((sale) => {
     if (filters.paymentMethod) {
       if (sale.status === "QUOTE") return false;
@@ -77,20 +75,20 @@ export async function listSales(filters: SaleFilters) {
 }
 
 export async function getSale(id: string) {
-  const sale = await sales().findOne({ _id: id });
+  const sale = await findById<Sale>("sales", id);
   if (!sale) throw new HttpError(404, "Venda não encontrada");
   return sale;
 }
 
 async function resolveCustomer(customerId?: string | null) {
   if (!customerId) return null;
-  const customer = await customers().findOne({ _id: customerId });
+  const customer = await findById<Customer>("customers", customerId);
   if (!customer) throw new HttpError(404, "Cliente não encontrado");
   return customer;
 }
 
 async function requireOpenCashSession() {
-  const open = await cashSessions().findOne({ status: "aberto" });
+  const [open] = await docs<CashSession>(`SELECT doc FROM cash_sessions WHERE doc->>'status' = 'aberto' LIMIT 1`);
   if (!open) throw new HttpError(409, "Nenhum caixa aberto. Abra o caixa para finalizar vendas.");
   return open;
 }
@@ -102,7 +100,7 @@ async function checkStock(items: SaleItem[]) {
     if (!isCustomItem(item)) demand.set(item.id, (demand.get(item.id) ?? 0) + item.qty);
   }
   for (const [id, qty] of demand) {
-    const product = await products().findOne({ _id: id });
+    const product = await findById<Product>("products", id);
     if (!product) throw new HttpError(404, "Produto não encontrado no estoque.");
     if (product.quantity < qty) {
       throw new HttpError(
@@ -145,7 +143,7 @@ function resolvePayment(total: number, payment: PaymentInput | undefined, custom
 async function createCreditReceivable(sale: Sale, customer: Customer) {
   const due = new Date();
   due.setDate(due.getDate() + 30);
-  await receivables().insertOne({
+  await insert<Receivable>("accounts_receivable", {
     _id: randomUUID(),
     description: `Crediário - venda ${sale.saleNumber}`,
     customerId: customer._id,
@@ -190,7 +188,7 @@ export async function createSale(input: CreateSaleInput, userName: string) {
       change: null,
       caixaId: null,
     };
-    await sales().insertOne(quote);
+    await insert("sales", quote);
     return quote;
   }
 
@@ -204,7 +202,7 @@ export async function createSale(input: CreateSaleInput, userName: string) {
     status: "FINALIZED",
     caixaId: session._id,
   };
-  await sales().insertOne(sale);
+  await insert("sales", sale);
   await takeStock(demand, sale.saleNumber, userName);
   if (sale.paymentMethod === "Crediário" && customer) await createCreditReceivable(sale, customer);
   return sale;
@@ -212,7 +210,7 @@ export async function createSale(input: CreateSaleInput, userName: string) {
 
 /** Turns a quote into a finalized sale (cash session and stock are checked now). */
 export async function convertQuote(id: string, payment: PaymentInput, userName: string) {
-  const quote = await sales().findOne({ _id: id });
+  const quote = await findById<Sale>("sales", id);
   if (!quote) throw new HttpError(404, "Orçamento não encontrado");
   if (quote.status !== "QUOTE") throw new HttpError(400, "Somente orçamentos podem ser convertidos.");
   const session = await requireOpenCashSession();
@@ -227,7 +225,7 @@ export async function convertQuote(id: string, payment: PaymentInput, userName: 
     userName,
     createdAt: new Date().toISOString(),
   };
-  await sales().replaceOne({ _id: id }, sale);
+  await replace("sales", sale);
   await takeStock(demand, sale.saleNumber, userName);
   if (sale.paymentMethod === "Crediário" && customer) await createCreditReceivable(sale, customer);
   return sale;
@@ -240,22 +238,18 @@ export async function cancelSale(id: string, reason: string, user: { name: strin
 
   if (sale.status === "FINALIZED") {
     for (const item of sale.items) {
-      if (isCustomItem(item) || !(await products().findOne({ _id: item.id }))) continue;
+      if (isCustomItem(item) || !(await findById("products", item.id))) continue;
       await recordMovement(item.id, "ESTORNO", item.qty, {
         reason: `Cancelamento: ${reason}`,
         reference: `Venda #${sale.saleNumber}`,
         userName: user.name,
       });
     }
-    await receivables().updateMany(
-      { saleId: sale._id, status: "pending" },
-      { $set: { status: "cancelled", notes: `Venda #${sale.saleNumber} cancelada` } },
+    await query(
+      `UPDATE accounts_receivable SET doc = doc || $2::jsonb WHERE doc->>'saleId' = $1 AND doc->>'status' = 'pending'`,
+      [sale._id, json({ status: "cancelled", notes: `Venda #${sale.saleNumber} cancelada` })],
     );
   }
 
-  return (await sales().findOneAndUpdate(
-    { _id: id },
-    { $set: { status: "CANCELLED", cancelledAt: new Date().toISOString(), cancelReason: reason } },
-    { returnDocument: "after" },
-  ))!;
+  return (await merge<Sale>("sales", id, { status: "CANCELLED", cancelledAt: new Date().toISOString(), cancelReason: reason }))!;
 }

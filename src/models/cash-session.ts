@@ -1,16 +1,12 @@
 // Cash register sessions: open, cash in/out (suprimento/sangria), close with counting, audit.
 import { randomUUID } from "node:crypto";
 import { HttpError } from "../core/http-error.ts";
-import { collection, nextSequence } from "../db.ts";
+import { docs, findById, insert, json, nextSequence, replace } from "../db.ts";
 import { round2, saleAmountsByMethod } from "../lib/calc.ts";
 import { dayBounds } from "../lib/dates.ts";
 import type { CashMovement, CashSession, CashSummary, CountedByMethod } from "../views/cash-session.ts";
 import { PAYMENT_METHODS, type PaymentMethod } from "../views/common.ts";
 import type { Sale } from "../views/sale.ts";
-
-const cashSessions = () => collection<CashSession>("cash_sessions");
-const cashMovements = () => collection<CashMovement>("cash_movements");
-const sales = () => collection<Sale>("sales");
 
 /** Methods counted at closing ("Crediário" does not enter the drawer). */
 const RECONCILED_METHODS = PAYMENT_METHODS.filter((m) => m !== "Crediário");
@@ -78,8 +74,11 @@ function summarize(session: CashSession, sessionSales: Sale[], movements: CashMo
 
 async function sessionData(sessionId: string) {
   const [sessionSales, movements] = await Promise.all([
-    sales().find({ caixaId: sessionId }).sort({ createdAt: -1 }).toArray(),
-    cashMovements().find({ caixaId: sessionId }).sort({ timestamp: 1 }).toArray(),
+    docs<Sale>(`SELECT doc FROM sales WHERE doc->>'caixaId' = $1 ORDER BY doc->>'createdAt' COLLATE "C" DESC`, [sessionId]),
+    docs<CashMovement>(
+      `SELECT doc FROM cash_movements WHERE doc->>'caixaId' = $1 ORDER BY doc->>'timestamp' COLLATE "C"`,
+      [sessionId],
+    ),
   ]);
   return { sessionSales, movements };
 }
@@ -90,13 +89,16 @@ async function summaryOf(session: CashSession) {
 }
 
 /** Open session with its summary, or null. */
+const findOpenSession = async () =>
+  (await docs<CashSession>(`SELECT doc FROM cash_sessions WHERE doc->>'status' = 'aberto' LIMIT 1`))[0];
+
 export async function getOpenSession() {
-  const open = await cashSessions().findOne({ status: "aberto" });
+  const open = await findOpenSession();
   return open ? summaryOf(open) : null;
 }
 
 export async function getSessionDetail(id: string) {
-  const session = await cashSessions().findOne({ _id: id });
+  const session = await findById<CashSession>("cash_sessions", id);
   if (!session) throw new HttpError(404, "Caixa não encontrado");
   const { sessionSales, movements } = await sessionData(id);
   return { ...summarize(session, sessionSales, movements), sales: sessionSales, movements };
@@ -104,13 +106,18 @@ export async function getSessionDetail(id: string) {
 
 export async function listSessionSummaries(filters: { start?: string; end?: string; status?: CashSession["status"] }) {
   const query: Record<string, unknown> = {};
-  if (filters.start || filters.end) query.openedAt = dayBounds(filters.start, filters.end);
   if (filters.status) query.status = filters.status;
-  const sessions = await cashSessions().find(query).sort({ openedAt: -1 }).toArray();
+  const { from, to } = dayBounds(filters.start, filters.end);
+  const sessions = await docs<CashSession>(
+    `SELECT doc FROM cash_sessions
+     WHERE doc @> $1::jsonb AND doc->>'openedAt' COLLATE "C" BETWEEN $2 AND $3
+     ORDER BY doc->>'openedAt' COLLATE "C" DESC`,
+    [json(query), from, to],
+  );
   const ids = sessions.map((s) => s._id);
   const [saleList, moveList] = await Promise.all([
-    sales().find({ caixaId: { $in: ids } }).toArray(),
-    cashMovements().find({ caixaId: { $in: ids } }).toArray(),
+    docs<Sale>("SELECT doc FROM sales WHERE doc->>'caixaId' = ANY($1)", [ids]),
+    docs<CashMovement>("SELECT doc FROM cash_movements WHERE doc->>'caixaId' = ANY($1)", [ids]),
   ]);
   return sessions.map((s) =>
     summarize(
@@ -122,7 +129,7 @@ export async function listSessionSummaries(filters: { start?: string; end?: stri
 }
 
 export async function openCashSession(input: { openingAmount: number; notes?: string }, operatorName: string) {
-  if (await cashSessions().findOne({ status: "aberto" })) {
+  if (await findOpenSession()) {
     throw new HttpError(409, "Já existe um caixa aberto. Feche-o antes de abrir um novo.");
   }
   const session: CashSession = {
@@ -134,7 +141,7 @@ export async function openCashSession(input: { openingAmount: number; notes?: st
     openingAmount: round2(input.openingAmount),
     notes: input.notes?.trim() || undefined,
   };
-  await cashSessions().insertOne(session);
+  await insert("cash_sessions", session);
   return session;
 }
 
@@ -143,7 +150,7 @@ export async function addCashMovement(
   input: { type: CashMovement["type"]; amount: number; reason: string },
   userName: string,
 ) {
-  const session = await cashSessions().findOne({ _id: sessionId });
+  const session = await findById<CashSession>("cash_sessions", sessionId);
   if (!session || session.status !== "aberto") throw new HttpError(409, "O caixa precisa estar aberto.");
   const amount = round2(input.amount);
   if (input.type === "retirada") {
@@ -162,12 +169,12 @@ export async function addCashMovement(
     userName,
     timestamp: new Date().toISOString(),
   };
-  await cashMovements().insertOne(movement);
+  await insert("cash_movements", movement);
   return movement;
 }
 
 export async function closeCashSession(id: string, input: { counted: CountedByMethod; notes?: string }) {
-  const session = await cashSessions().findOne({ _id: id });
+  const session = await findById<CashSession>("cash_sessions", id);
   if (!session || session.status !== "aberto") throw new HttpError(409, "Nenhum caixa aberto para fechar.");
   const counted: CountedByMethod = {};
   for (const m of RECONCILED_METHODS) counted[m] = round2(input.counted[m] ?? 0);
@@ -179,6 +186,6 @@ export async function closeCashSession(id: string, input: { counted: CountedByMe
     countedByMethod: counted,
     notes: input.notes?.trim() || session.notes,
   };
-  await cashSessions().replaceOne({ _id: id }, closed);
+  await replace("cash_sessions", closed);
   return summaryOf(closed);
 }

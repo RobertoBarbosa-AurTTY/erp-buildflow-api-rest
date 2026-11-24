@@ -1,10 +1,10 @@
-// Integration tests against a real MongoDB (separate database: buildflow_test).
+// Integration tests against a real PostgreSQL (separate database: buildflow_test).
 // Run: docker compose up -d && npm test
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { after, before, describe, test } from "node:test";
 
-process.env.MONGODB_URI = process.env.TEST_MONGODB_URI || "mongodb://localhost:27017/buildflow_test";
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || "postgres://postgres:postgres@localhost:5432/buildflow_test";
 process.env.ALLOW_DATA_RESET = "true";
 
 const { createApp } = await import("../src/app.ts");
@@ -26,9 +26,8 @@ async function api(method: string, path: string, body?: unknown, as = "admin") {
 }
 
 before(async () => {
-  const database = await db.connect();
-  assert.equal(database.databaseName, "buildflow_test", "tests must not run on the main database");
-  await db.ensureIndexes();
+  assert.equal(await db.connect(), "buildflow_test", "tests must not run on the main database");
+  await db.ensureSchema();
   await seedDatabase();
   const { app } = await createApp();
   server = app.listen(0);

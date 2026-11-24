@@ -3,14 +3,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../core/http-error.ts";
-import { collection } from "../db.ts";
+import { docs, findById, insert, query, removeById, replace } from "../db.ts";
 import { round2 } from "../lib/calc.ts";
 import { addMonths } from "../lib/dates.ts";
 import { installmentCount, installmentDescription, installmentDueDates, splitInstallments } from "../lib/installments.ts";
 import type { Payable } from "../views/bill.ts";
 import { PaymentMethod } from "../views/common.ts";
-
-const payables = () => collection<Payable>("accounts_payable");
 
 export const PAYABLE_CATEGORIES = [
   "Fornecedores", "Aluguel", "Utilidades", "Impostos", "Pessoal", "Serviços", "Manutenção", "Seguros", "Outros",
@@ -40,11 +38,14 @@ export type SettleInput = z.infer<typeof SettleInput>;
 const clean = (value: string | undefined) => value?.trim() || undefined;
 
 export async function listPayables() {
-  return payables().find().sort({ dueDate: 1, installmentNumber: 1 }).toArray();
+  return docs<Payable>(
+    `SELECT doc FROM accounts_payable
+     ORDER BY doc->>'dueDate' COLLATE "C", (doc->>'installmentNumber')::int NULLS FIRST`,
+  );
 }
 
 async function getPayable(id: string) {
-  const bill = await payables().findOne({ _id: id });
+  const bill = await findById<Payable>("accounts_payable", id);
   if (!bill) throw new HttpError(404, "Conta não encontrada");
   return bill;
 }
@@ -79,7 +80,7 @@ export async function createPayable(input: PayableInput) {
   } else {
     bills = [{ ...base, _id: randomUUID(), amount: round2(input.amount), dueDate: input.dueDate, recurring: Boolean(input.recurring) }];
   }
-  await payables().insertMany(bills);
+  await insert("accounts_payable", bills);
   return bills;
 }
 
@@ -100,7 +101,7 @@ export async function updatePayable(id: string, input: PayableInput) {
     notes: clean(input.notes),
     recurring: existing.installmentGroupId ? false : Boolean(input.recurring),
   };
-  await payables().replaceOne({ _id: id }, bill);
+  await replace("accounts_payable", bill);
   return bill;
 }
 
@@ -109,7 +110,7 @@ export async function payPayable(id: string, input: SettleInput) {
   if (existing.status === "paid") throw new HttpError(400, "Esta conta já está paga");
   if (existing.status === "cancelled") throw new HttpError(400, "Conta cancelada não pode ser paga");
   const paid: Payable = { ...existing, status: "paid", paidDate: input.date, paymentMethod: input.paymentMethod };
-  await payables().replaceOne({ _id: id }, paid);
+  await replace("accounts_payable", paid);
   let next: Payable | null = null;
   if (existing.recurring) {
     const { paidDate: _p, paymentMethod: _m, ...template } = existing;
@@ -120,7 +121,7 @@ export async function payPayable(id: string, input: SettleInput) {
       status: "pending",
       createdAt: new Date().toISOString(),
     };
-    await payables().insertOne(next);
+    await insert("accounts_payable", next);
   }
   return { paid, next };
 }
@@ -129,17 +130,19 @@ export async function cancelPayable(id: string) {
   const existing = await getPayable(id);
   if (existing.status === "paid") throw new HttpError(400, "Contas pagas não podem ser canceladas");
   const cancelled: Payable = { ...existing, status: "cancelled" };
-  await payables().replaceOne({ _id: id }, cancelled);
+  await replace("accounts_payable", cancelled);
   return cancelled;
 }
 
 export async function deletePayable(id: string) {
-  const { deletedCount } = await payables().deleteOne({ _id: id });
-  if (!deletedCount) throw new HttpError(404, "Conta não encontrada");
+  if (!(await removeById("accounts_payable", id))) throw new HttpError(404, "Conta não encontrada");
 }
 
 /** Deletes the open/cancelled installments of a group. Paid ones stay in the history. */
 export async function deletePayableGroup(groupId: string) {
-  const { deletedCount } = await payables().deleteMany({ installmentGroupId: groupId, status: { $ne: "paid" } });
-  return { deleted: deletedCount };
+  const { rowCount } = await query(
+    `DELETE FROM accounts_payable WHERE doc->>'installmentGroupId' = $1 AND doc->>'status' IS DISTINCT FROM 'paid'`,
+    [groupId],
+  );
+  return { deleted: rowCount ?? 0 };
 }

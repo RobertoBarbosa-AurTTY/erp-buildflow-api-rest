@@ -1,6 +1,6 @@
 // Dashboard, sales report and DRE. Only FINALIZED sales count (quotes and cancelled are left out).
 // The numbers are computed in memory from the period's documents: simple and enough for a store's volume.
-import { collection } from "../db.ts";
+import { docs, findById } from "../db.ts";
 import { billStatus, daysUntil, round2, stockStatus } from "../lib/calc.ts";
 import { addDays, dayBounds, dayKey, dayRange, inDayRange, parseDayKey, shortDayLabel, startOfDay } from "../lib/dates.ts";
 import type { Payable, Receivable } from "../views/bill.ts";
@@ -23,10 +23,10 @@ export interface Snapshot {
 /** Loads the data used by the reports. `fromKey` limits the sales to load. */
 export async function loadSnapshot(fromKey?: string): Promise<Snapshot> {
   const [sales, products, payables, receivables] = await Promise.all([
-    collection<Sale>("sales").find(fromKey ? { createdAt: dayBounds(fromKey) } : {}).toArray(),
-    collection<Product>("products").find().toArray(),
-    collection<Payable>("accounts_payable").find().toArray(),
-    collection<Receivable>("accounts_receivable").find().toArray(),
+    docs<Sale>(`SELECT doc FROM sales WHERE doc->>'createdAt' COLLATE "C" >= $1`, [dayBounds(fromKey).from]),
+    docs<Product>("SELECT doc FROM products"),
+    docs<Payable>("SELECT doc FROM accounts_payable"),
+    docs<Receivable>("SELECT doc FROM accounts_receivable"),
   ]);
   return { sales, products, payables, receivables, costs: new Map(products.map((p) => [p._id, p.costPrice])) };
 }
@@ -164,7 +164,7 @@ export async function getDashboard(period: DashboardPeriod): Promise<Dashboard> 
   const range = periodRange(period);
   const monthStart = dayKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const data = await loadSnapshot([range.prevFrom, monthStart].sort()[0]);
-  const settings = await collection<CompanySettings & { _id: string }>("settings").findOne({ _id: "company" });
+  const settings = await findById<CompanySettings>("settings", "company");
   const { costs } = data;
   const current = finalizedSales(data, range.from, range.to);
   const todaySum = summarize(finalizedSales(data, range.to, range.to), costs);

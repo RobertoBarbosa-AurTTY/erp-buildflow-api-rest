@@ -2,13 +2,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../core/http-error.ts";
-import { collection } from "../db.ts";
+import { docs, findById, insert, merge, removeById } from "../db.ts";
 import { normalize } from "../lib/text.ts";
-import type { WarehouseLocation } from "../views/product.ts";
+import type { Product, WarehouseLocation } from "../views/product.ts";
 import type { WarehouseAddress } from "../views/stock.ts";
-import { products } from "./product.ts";
 
-const addresses = () => collection<WarehouseAddress>("warehouse_addresses");
+const activeProducts = () => docs<Product>(`SELECT doc FROM products WHERE doc @> '{"active": true}'`);
 
 export const AddressInput = z
   .object({
@@ -81,8 +80,8 @@ function buildAddress(input: AddressInput): WarehouseAddress {
 
 export async function listAddresses() {
   const [list, active] = await Promise.all([
-    addresses().find().sort({ code: 1 }).toArray(),
-    products().find({ active: true }, { projection: { name: 1, sku: 1, quantity: 1, unit: 1, location: 1 } }).toArray(),
+    docs<WarehouseAddress>(`SELECT doc FROM warehouse_addresses ORDER BY doc->>'code' COLLATE "C"`),
+    activeProducts(),
   ]);
   return list.map((address) => ({
     ...address,
@@ -94,15 +93,15 @@ export async function listAddresses() {
 
 export async function createAddress(input: AddressInput) {
   const address = buildAddress(input);
-  if (await addresses().findOne({ code: address.code })) throw new HttpError(409, `O endereço ${address.code} já existe`);
-  await addresses().insertOne(address);
+  if ((await docs("SELECT doc FROM warehouse_addresses WHERE doc->>'code' = $1", [address.code])).length) throw new HttpError(409, `O endereço ${address.code} já existe`);
+  await insert("warehouse_addresses", address);
   return address;
 }
 
 export async function createAddressBatch(input: AddressBatchInput) {
   const total = input.aisles.length * input.shelves * input.levels * input.slots;
   if (total > 2000) throw new HttpError(400, "Limite de 2.000 endereços por lote");
-  const existing = new Set((await addresses().find({}, { projection: { code: 1 } }).toArray()).map((a) => a.code));
+  const existing = new Set((await docs<WarehouseAddress>("SELECT doc FROM warehouse_addresses")).map((a) => a.code));
   const created: WarehouseAddress[] = [];
   let skipped = 0;
   for (const aisle of input.aisles) {
@@ -127,22 +126,22 @@ export async function createAddressBatch(input: AddressBatchInput) {
       }
     }
   }
-  if (created.length) await addresses().insertMany(created);
+  await insert("warehouse_addresses", created);
   return { created: created.length, skipped };
 }
 
 export async function setAddressActive(id: string, active: boolean) {
-  const address = await addresses().findOneAndUpdate({ _id: id }, { $set: { active } }, { returnDocument: "after" });
+  const address = await merge<WarehouseAddress>("warehouse_addresses", id, { active });
   if (!address) throw new HttpError(404, "Endereço não encontrado");
   return address;
 }
 
 export async function deleteAddress(id: string) {
-  const address = await addresses().findOne({ _id: id });
+  const address = await findById<WarehouseAddress>("warehouse_addresses", id);
   if (!address) throw new HttpError(404, "Endereço não encontrado");
-  const stored = await products().find({ active: true, location: { $exists: true } }).toArray();
+  const stored = await activeProducts();
   if (stored.some((p) => sameLocation(p.location, address))) {
     throw new HttpError(409, "Há produtos neste endereço. Mova-os antes de excluir.");
   }
-  await addresses().deleteOne({ _id: id });
+  await removeById("warehouse_addresses", id);
 }

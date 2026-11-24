@@ -1,11 +1,17 @@
 services:
-  mongo:
-    image: mongo:8
-    container_name: buildflow-mongo
+  postgres:
+    image: postgres:17
+    container_name: buildflow-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: buildflow
     ports:
-      - "27017:27017"
+      - "5432:5432"
     volumes:
-      - mongo-data:/data/db
+      - postgres-data:/var/lib/postgresql/data
+      # creates the buildflow_test database used by `npm test` (first start only)
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
 volumes:
-  mongo-data:
+  postgres-data:

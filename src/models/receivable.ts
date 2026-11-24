@@ -3,16 +3,13 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../core/http-error.ts";
-import { collection } from "../db.ts";
+import { docs, findById, insert, query, removeById, replace } from "../db.ts";
 import { round2 } from "../lib/calc.ts";
 import { addMonths } from "../lib/dates.ts";
 import { installmentCount, installmentDescription, installmentDueDates, splitInstallments } from "../lib/installments.ts";
 import type { Receivable } from "../views/bill.ts";
 import type { Customer } from "../views/customer.ts";
 import type { SettleInput } from "./payable.ts";
-
-const receivables = () => collection<Receivable>("accounts_receivable");
-const customers = () => collection<Customer>("customers");
 
 export const RECEIVABLE_CATEGORIES = ["Vendas a prazo", "Crediário", "Serviços", "Outros"];
 
@@ -35,18 +32,21 @@ export type ReceivableInput = z.infer<typeof ReceivableInput>;
 const clean = (value: string | undefined) => value?.trim() || undefined;
 
 export async function listReceivables() {
-  return receivables().find().sort({ dueDate: 1, installmentNumber: 1 }).toArray();
+  return docs<Receivable>(
+    `SELECT doc FROM accounts_receivable
+     ORDER BY doc->>'dueDate' COLLATE "C", (doc->>'installmentNumber')::int NULLS FIRST`,
+  );
 }
 
 async function getReceivable(id: string) {
-  const bill = await receivables().findOne({ _id: id });
+  const bill = await findById<Receivable>("accounts_receivable", id);
   if (!bill) throw new HttpError(404, "Conta não encontrada");
   return bill;
 }
 
 async function resolveCustomer(input: ReceivableInput) {
   if (input.customerId) {
-    const customer = await customers().findOne({ _id: input.customerId });
+    const customer = await findById<Customer>("customers", input.customerId);
     if (!customer) throw new HttpError(404, "Cliente não encontrado");
     return { customerId: customer._id, customerName: customer.name };
   }
@@ -83,7 +83,7 @@ export async function createReceivable(input: ReceivableInput) {
   } else {
     bills = [{ ...base, _id: randomUUID(), amount: round2(input.amount), dueDate: input.dueDate, recurring: Boolean(input.recurring) }];
   }
-  await receivables().insertMany(bills);
+  await insert("accounts_receivable", bills);
   return bills;
 }
 
@@ -103,7 +103,7 @@ export async function updateReceivable(id: string, input: ReceivableInput) {
     notes: clean(input.notes),
     recurring: existing.installmentGroupId ? false : Boolean(input.recurring),
   };
-  await receivables().replaceOne({ _id: id }, bill);
+  await replace("accounts_receivable", bill);
   return bill;
 }
 
@@ -112,7 +112,7 @@ export async function receiveReceivable(id: string, input: SettleInput) {
   if (existing.status === "paid") throw new HttpError(400, "Esta conta já foi recebida");
   if (existing.status === "cancelled") throw new HttpError(400, "Conta cancelada não pode ser recebida");
   const received: Receivable = { ...existing, status: "paid", receivedDate: input.date, paymentMethod: input.paymentMethod };
-  await receivables().replaceOne({ _id: id }, received);
+  await replace("accounts_receivable", received);
   let next: Receivable | null = null;
   if (existing.recurring) {
     const { receivedDate: _r, paymentMethod: _m, ...template } = existing;
@@ -123,7 +123,7 @@ export async function receiveReceivable(id: string, input: SettleInput) {
       status: "pending",
       createdAt: new Date().toISOString(),
     };
-    await receivables().insertOne(next);
+    await insert("accounts_receivable", next);
   }
   return { received, next };
 }
@@ -132,17 +132,19 @@ export async function cancelReceivable(id: string) {
   const existing = await getReceivable(id);
   if (existing.status === "paid") throw new HttpError(400, "Contas recebidas não podem ser canceladas");
   const cancelled: Receivable = { ...existing, status: "cancelled" };
-  await receivables().replaceOne({ _id: id }, cancelled);
+  await replace("accounts_receivable", cancelled);
   return cancelled;
 }
 
 export async function deleteReceivable(id: string) {
-  const { deletedCount } = await receivables().deleteOne({ _id: id });
-  if (!deletedCount) throw new HttpError(404, "Conta não encontrada");
+  if (!(await removeById("accounts_receivable", id))) throw new HttpError(404, "Conta não encontrada");
 }
 
 /** Deletes the open/cancelled installments of a group. Received ones stay in the history. */
 export async function deleteReceivableGroup(groupId: string) {
-  const { deletedCount } = await receivables().deleteMany({ installmentGroupId: groupId, status: { $ne: "paid" } });
-  return { deleted: deletedCount };
+  const { rowCount } = await query(
+    `DELETE FROM accounts_receivable WHERE doc->>'installmentGroupId' = $1 AND doc->>'status' IS DISTINCT FROM 'paid'`,
+    [groupId],
+  );
+  return { deleted: rowCount ?? 0 };
 }

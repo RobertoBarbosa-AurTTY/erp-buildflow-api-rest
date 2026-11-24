@@ -1,9 +1,9 @@
 import { config } from "./config.ts";
 import { createApp } from "./app.ts";
-import { connect, disconnect, ensureIndexes } from "./db.ts";
+import { connect, disconnect, ensureSchema } from "./db.ts";
 
 await connect();
-await ensureIndexes();
+await ensureSchema();
 const { app, routes } = await createApp();
 
 const server = app.listen(config.port, () => {

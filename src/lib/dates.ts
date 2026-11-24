@@ -53,12 +53,12 @@ export function inDayRange(value: string | undefined, fromKey: string, toKey: st
   return key >= fromKey && key <= toKey;
 }
 
-/** "YYYY-MM-DD" -> ISO range [start of day, end of day] in local time, for Mongo string filters. */
+/** "YYYY-MM-DD" -> ISO range [start of day, end of day] in local time, compared as text. A missing side is open. */
 export function dayBounds(fromKey?: string, toKey?: string) {
-  const range: { $gte?: string; $lte?: string } = {};
-  if (fromKey) range.$gte = new Date(`${fromKey}T00:00:00`).toISOString();
-  if (toKey) range.$lte = new Date(`${toKey}T23:59:59.999`).toISOString();
-  return range;
+  return {
+    from: fromKey ? new Date(`${fromKey}T00:00:00`).toISOString() : "",
+    to: toKey ? new Date(`${toKey}T23:59:59.999`).toISOString() : "9999",
+  };
 }
 
 export function shortDayLabel(date: Date) {

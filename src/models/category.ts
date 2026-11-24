@@ -1,19 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { collection } from "../db.ts";
+import { docs, insert } from "../db.ts";
 import { byName, normalize } from "../lib/text.ts";
 import type { Category } from "../views/product.ts";
 
-const categories = () => collection<Category>("categories");
+const categories = () => docs<Category>("SELECT doc FROM categories");
 
 export async function listCategories() {
-  return (await categories().find().toArray()).sort(byName);
+  return (await categories()).sort(byName);
 }
 
 /** Returns the existing category when the name already exists (case/accent insensitive). */
 export async function createCategory(name: string) {
-  const existing = (await categories().find().toArray()).find((c) => normalize(c.name) === normalize(name));
+  const existing = (await categories()).find((c) => normalize(c.name) === normalize(name));
   if (existing) return existing;
   const category: Category = { _id: randomUUID(), name };
-  await categories().insertOne(category);
+  await insert("categories", category);
   return category;
 }

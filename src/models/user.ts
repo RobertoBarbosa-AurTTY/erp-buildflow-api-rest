@@ -2,7 +2,7 @@
 import bcrypt from "bcryptjs";
 import { signToken } from "../core/auth.ts";
 import { HttpError } from "../core/http-error.ts";
-import { collection } from "../db.ts";
+import { docs } from "../db.ts";
 import type { Role, SessionUser } from "../views/auth.ts";
 
 export interface UserDocument {
@@ -14,14 +14,15 @@ export interface UserDocument {
   active: boolean;
 }
 
-const users = () => collection<UserDocument>("users");
-
 export function toSessionUser(user: UserDocument): SessionUser {
   return { id: user._id, name: user.name, email: user.email, role: user.role };
 }
 
 export async function login(email: string, password: string) {
-  const user = await users().findOne({ email: email.trim().toLowerCase(), active: true });
+  const [user] = await docs<UserDocument>(
+    `SELECT doc FROM users WHERE doc->>'email' = $1 AND doc @> '{"active": true}'`,
+    [email.trim().toLowerCase()],
+  );
   if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
     throw new HttpError(401, "E-mail ou senha inválidos");
   }
@@ -30,13 +31,13 @@ export async function login(email: string, password: string) {
 }
 
 export async function getUser(id: string) {
-  const user = await users().findOne({ _id: id, active: true });
+  const [user] = await docs<UserDocument>(`SELECT doc FROM users WHERE id = $1 AND doc @> '{"active": true}'`, [id]);
   if (!user) throw new HttpError(401, "Usuário não encontrado ou inativo");
   return toSessionUser(user);
 }
 
 export async function listUsers() {
-  const list = await users().find().sort({ name: 1 }).toArray();
+  const list = await docs<UserDocument>(`SELECT doc FROM users ORDER BY doc->>'name' COLLATE "C"`);
   return list.map(toSessionUser);
 }
 

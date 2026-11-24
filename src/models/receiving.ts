@@ -2,11 +2,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../core/http-error.ts";
+import { docs, findById, insert, merge } from "../db.ts";
 import { round2 } from "../lib/calc.ts";
 import type { Product } from "../views/product.ts";
 import type { ReceivingSummary, StockMovement } from "../views/stock.ts";
-import { ProductInput, products, validateProduct } from "./product.ts";
-import { recordMovement, stockMovements } from "./stock-movement.ts";
+import { ProductInput, validateProduct } from "./product.ts";
+import { recordMovement } from "./stock-movement.ts";
 
 const SUPPLIER_PREFIX = "Entrada de mercadoria - ";
 
@@ -34,7 +35,7 @@ export type ReceivingInput = z.infer<typeof ReceivingInput>;
 export async function registerReceiving(input: ReceivingInput, userName: string) {
   for (const [index, item] of input.items.entries()) {
     if (!item.productId && !item.newProduct) throw new HttpError(400, `Item ${index + 1}: selecione um produto`);
-    if (item.productId && !(await products().findOne({ _id: item.productId }))) {
+    if (item.productId && !(await findById("products", item.productId))) {
       throw new HttpError(404, `Item ${index + 1}: produto não encontrado`);
     }
     if (item.newProduct) await validateProduct(item.newProduct);
@@ -54,12 +55,12 @@ export async function registerReceiving(input: ReceivingInput, userName: string)
         costPrice: item.unitCost,
         createdAt: new Date().toISOString(),
       };
-      await products().insertOne(product);
+      await insert("products", product);
       productId = product._id;
       createdProducts++;
     }
     if (input.updateCost && item.unitCost > 0) {
-      await products().updateOne({ _id: productId }, { $set: { costPrice: round2(item.unitCost), supplier: input.supplier } });
+      await merge("products", productId, { costPrice: round2(item.unitCost), supplier: input.supplier });
     }
     movements.push(await recordMovement(productId, "ENTRADA", item.quantity, { reason, reference, userName }));
   }
@@ -69,10 +70,10 @@ export async function registerReceiving(input: ReceivingInput, userName: string)
 
 /** Receipts grouped by reference (invoice), newest first. */
 export async function listReceivings(limit: number) {
-  const entries = await stockMovements()
-    .find({ type: "ENTRADA", reference: { $exists: true, $ne: "" } })
-    .sort({ timestamp: -1 })
-    .toArray();
+  const entries = await docs<StockMovement>(
+    `SELECT doc FROM stock_movements WHERE doc->>'type' = 'ENTRADA' AND doc ? 'reference' AND doc->>'reference' <> ''
+     ORDER BY doc->>'timestamp' COLLATE "C" DESC`,
+  );
   const groups = new Map<string, ReceivingSummary>();
   for (const m of entries) {
     const group = groups.get(m.reference!);

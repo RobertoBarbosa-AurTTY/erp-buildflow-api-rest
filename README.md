@@ -2,12 +2,12 @@
 
 REST API for [BuildFlow ERP](https://github.com/RobertoBarbosa-AurTTY/erp_buildflow_nextjs) (POS, stock and finance for building material stores).
 
-**Node.js 22.18+** (runs TypeScript directly, no build step) · **Express 5** · **MongoDB** · **zod 4** · **Swagger / OpenAPI 3.1**
+**Node.js 22.18+** (runs TypeScript directly, no build step) · **Express 5** · **PostgreSQL** · **zod 4** · **Swagger / OpenAPI 3.1**
 
 ## Quick start
 
 ```bash
-docker compose up -d       # MongoDB on localhost:27017
+docker compose up -d       # PostgreSQL on localhost:5432 (databases buildflow and buildflow_test)
 cp .env.example .env
 npm install
 npm run seed               # demo data (same data as the front-end demo)
@@ -31,13 +31,13 @@ npm run dev                # http://localhost:3333/api
 ```text
 src/
 ├── controllers/      # C: one file per endpoint. Folder = path, file = HTTP verb
-├── models/           # M: MongoDB access + business rules + input schemas
+├── models/           # M: SQL access + business rules + input schemas
 ├── views/            # V: zod schemas of the JSON responses (also the Swagger models)
 ├── core/             # routing, auth, OpenAPI builder, HttpError
 ├── lib/              # pure helpers (money, dates, CPF/CNPJ, installments)
 ├── seed/             # demo data
 ├── app.ts            # Express app
-├── db.ts             # Mongo connection
+├── db.ts             # PostgreSQL pool, table helpers and schema
 └── server.ts
 ```
 
@@ -150,8 +150,13 @@ The user name on movements, sales and cash sessions comes from the token, so the
 
 ## Notes
 
-- Without a replica set MongoDB has no multi-document transactions, so a sale writes the sale, the stock movements
-  and the receivable in sequence. Stock is checked right before writing.
+- Each collection is a table `(id text primary key, doc jsonb)`: documents keep the shape the front-end uses and the
+  queries filter on `doc`. Tables and indexes are created on start (`ensureSchema`), so there are no migrations to run.
+  Text sorts use `COLLATE "C"` (plain byte order, like a string compare).
+- A sale writes the sale, the stock movements and the receivable in sequence (no transaction). Stock is checked right
+  before writing, and each stock change is a single atomic `UPDATE`.
+- `jsonb` stores object keys in its own order (shorter keys first), so the JSON keys may come in a different order
+  than they were written. The values are the same.
 - Reports load the period's documents and compute in memory (same formulas as the front-end). That is fine for the
-  volume of a store; move to aggregation pipelines if it grows a lot.
+  volume of a store; move to SQL aggregations if it grows a lot.
 - `POST /data/reset` only works with `ALLOW_DATA_RESET=true`. Keep it `false` in production.
