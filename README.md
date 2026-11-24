@@ -4,6 +4,9 @@ REST API for [BuildFlow ERP](https://github.com/RobertoBarbosa-AurTTY/erp_buildf
 
 **Node.js 22.18+** (runs TypeScript directly, no build step) · **Express 5** · **PostgreSQL** · **zod 4** · **Swagger / OpenAPI 3.1**
 
+**Live:** https://buildflow-api-6xt4.onrender.com/api · Swagger UI: https://buildflow-api-6xt4.onrender.com/docs
+(Render free plan: the first request after ~15 min idle takes about a minute while the service wakes up.)
+
 ## Quick start
 
 ```bash
