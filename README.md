@@ -16,7 +16,6 @@ npm run dev                # http://localhost:3333/api
 
 - Swagger UI: http://localhost:3333/docs
 - OpenAPI JSON: http://localhost:3333/openapi.json
-- Logins: `admin@buildflow.com.br / admin123`, `gerente@buildflow.com.br / gerente123`, `caixa@buildflow.com.br / caixa123`
 
 | Script | What it does |
 |:--|:--|

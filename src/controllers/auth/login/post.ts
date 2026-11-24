@@ -9,8 +9,8 @@ export default defineRoute({
   tags: ["Auth"],
   access: "public",
   body: z.object({
-    email: z.string().meta({ examples: ["admin@buildflow.com.br"] }),
-    password: z.string().meta({ examples: ["admin123"] }),
+    email: z.string().meta({ examples: ["usuario@empresa.com.br"] }),
+    password: z.string(),
   }),
   response: LoginResult,
   errors: [401],
